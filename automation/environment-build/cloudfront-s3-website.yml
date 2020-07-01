@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Creates an S3 bucket and CloudFront Distribution using Origins Access ID
+
+Parameters:
+  pOriginBucketName:
+    Type: String
+    Description: Name of the S3 bucket in which the static content is to be hosted
+
+  pHostName:
+    Type: String
+    Default: getstarted
+    Description: The hostname of the site
+    AllowedPattern: (?!-)[a-zA-Z0-9-.]{1,20}(?<!-)
+    ConstraintDescription: must be a valid DNS name.
+
+  pDomainName:
+    Type: String
+    Default: awsworkshop.io
+    Description: The DNS name of an existing Amazon Route 53 hosted zone 
+    AllowedPattern: (?!-)[a-zA-Z0-9-.]{1,63}(?<!-)
+    ConstraintDescription: must be a valid DNS domain name.
+
+  pCertificateArn:
+    Type: String
+    Description: ARN of a certificate in us-east-1 as its needed for a CloudFront Distribution
+
+  pHostedZoneId:
+    Type: String
+    Description: Route53 Hosted Zone ID
+
+Conditions:
+  cCreateDnsRecord: !Not [!Equals [ !Ref 'pHostedZoneId', '' ] ]
+  cUseCertificateArn: !Not [!Equals [ !Ref 'pCertificateArn', '' ] ]
+  cUseDefaultCert: !Equals [ !Ref 'pCertificateArn', '' ]
+
+Resources:
+  rOriginAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${pOriginBucketName}-origin-access-logs'
+      AccessControl: LogDeliveryWrite
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  rOriginBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: rOriginAccessLogsBucket
+    Properties:
+      BucketName: !Ref pOriginBucketName
+      AccessControl: BucketOwnerFullControl
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Sub '${pOriginBucketName}-origin-access-logs'
+
+  rCloudFrontOriginAccessId:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties: 
+      CloudFrontOriginAccessIdentityConfig: 
+        Comment: !Sub 'access-identity-${rOriginBucket.DomainName}'
+
+  rOriginBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref rOriginBucket
+      PolicyDocument:
+        Statement:
+        - Action: s3:GetObject
+          Effect: Allow
+          Resource: !Sub 'arn:aws:s3:::${rOriginBucket}/*'
+          Principal: 
+            CanonicalUser: !GetAtt rCloudFrontOriginAccessId.S3CanonicalUserId
+
+  rCdnAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${pOriginBucketName}-cdn-access-logs'
+      AccessControl: LogDeliveryWrite
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  rCloudFrontDistro:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Ref rOriginBucket
+        Aliases:
+        - !If [ cUseCertificateArn, !Sub '${pHostName}.${pDomainName}', !Ref 'AWS::NoValue' ]
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - GET
+          - HEAD
+          - OPTIONS
+          DefaultTTL: 3600
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: none
+          TargetOriginId: !Sub 'S3-${pOriginBucketName}'
+          ViewerProtocolPolicy: 'redirect-to-https'
+        DefaultRootObject: index.html
+        Enabled: true
+        HttpVersion: 'http2'
+        Origins:
+        - DomainName: !GetAtt rOriginBucket.DomainName
+          Id: !Sub 'S3-${pOriginBucketName}'
+          S3OriginConfig:
+            OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${rCloudFrontOriginAccessId}' 
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: !If [ cUseDefaultCert, true, !Ref 'AWS::NoValue' ]
+          AcmCertificateArn: !If [ cUseCertificateArn, !Ref pCertificateArn, !Ref 'AWS::NoValue' ]
+          SslSupportMethod:  !If [ cUseCertificateArn, sni-only, !Ref 'AWS::NoValue' ]
+        Logging: 
+          Bucket: !GetAtt rCdnAccessLogsBucket.DomainName
+
+  rDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: cCreateDnsRecord
+    Properties:
+      AliasTarget:
+        DNSName: !GetAtt rCloudFrontDistro.DomainName
+        HostedZoneId: !Ref pHostedZoneId
+      HostedZoneName: !Sub '${pDomainName}.'
+      Name: !Sub '${pHostName}.${pDomainName}'
+      Type: "A"
+        
+Outputs:
+  CloudFrontDistroId:
+    Value: !Ref rCloudFrontDistro
+    Description: CloudFront distribution ID
+
+  CloudFrontEndpoint:
+    Value: !GetAtt rCloudFrontDistro.DomainName
+    Description: CloudFront distribution endpoint
+
+  CloudFrontOriginAccessId:
+    Value: !Ref rCloudFrontOriginAccessId
+    Description: CloudFront origin access ID
+
+  CloudFrontOriginAccessCanonicalUserId:
+    Value: !GetAtt rCloudFrontOriginAccessId.S3CanonicalUserId
+    Description: CloudFront origin access identity canonical user ID
+
+  FullDomain:
+    Value: !Sub '${pHostName}.${pDomainName}'
+    Description: Full DomainName

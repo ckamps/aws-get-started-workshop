@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Creates am AWS CodeBuild project to rebuild and deploy a static web site.
+
+Parameters:
+  pProjectName:
+    Type: String
+    Description: Project Name
+    Default: getstarted
+
+  pOriginBucketName:
+    Type: String
+    Description: Name of the S3 bucket in which the static content is to be hosted
+
+  pCloudFrontDistroId:
+    Type: String
+    Description: CloudFront distribution ID
+
+  pGitHubRepoUrl:
+    Type: String
+    Description: The full url to the repo
+    Default: https://github.com/aws-samples/aws-get-started-workshop.git   
+  
+Resources:
+  rCodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${pOriginBucketName}/*
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${pCloudFrontDistroId}
+
+  rCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${pProjectName}-website
+      ServiceRole: !Ref rCodeBuildServiceRole
+      Source:
+        Type: GITHUB
+        Location: !Ref pGitHubRepoUrl
+        Auth:
+          Type: OAUTH
+        GitCloneDepth: 1
+        GitSubmodulesConfig:
+          FetchSubmodules: true
+        ReportBuildStatus: true
+        BuildSpec: /automation/content-build-deploy/buildspec.yml
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: PULL_REQUEST_CREATED,PULL_REQUEST_REOPENED,PULL_REQUEST_UPDATED,PULL_REQUEST_MERGED,PUSH
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:3.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: ORIGIN_BUCKET  
+            Value: !Ref pOriginBucketName  
+          - Name: CLOUDFRONT_DISTRO_ID  
+            Value: !Ref pCloudFrontDistroId 
+        PrivilegedMode: true  
